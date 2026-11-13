@@ -1,0 +1,22 @@
+# Saídas de vídeo e intermediários (arquivos grandes)
+inputs/projeto_atual/*
+temp/*
+outputs/*
+!inputs/projeto_atual/.gitkeep
+!temp/.gitkeep
+!outputs/.gitkeep
+
+# Binários externos baixados manualmente
+bin/*
+!bin/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Logs e temporários
+*.log
+.DS_Store

@@ -1,12 +1,131 @@
 {
   "nome_projeto": "anuncio_astros21_01",
-  "fps_origem": 12,
-  "fps_alvo": 30,
-  "escala_upscale": 2,
-  "modelo_escala": "realesr-animevideov3",
-  "clipes": [
-    "inputs/cena_01.mp4",
-    "inputs/cena_02.mp4",
-    "inputs/cena_03.mp4"
+  "versao_schema": 2,
+  "motor": "ltx-video",
+  "workflow_api": "scripts/workflow_api.json",
+  "comfyui": {
+    "url": "http://127.0.0.1:8188",
+    "output_dir": "~/Documentos/projetos/IAs/ComfyUI/output",
+    "input_dir": "~/Documentos/projetos/IAs/ComfyUI/input"
+  },
+  "modelos": {
+    "checkpoint": "ltx-video-2b-v0.9.1.safetensors",
+    "text_encoder": "t5xxl_fp8_e4m3fn.safetensors",
+    "reactor_swap": "inswapper_128.onnx",
+    "reactor_restore": "GFPGANv1.4.pth"
+  },
+  "geracao": {
+    "largura": 512,
+    "altura": 320,
+    "frames": 33,
+    "fps": 12,
+    "steps": 25,
+    "cfg": 3.0,
+    "sampler": "euler",
+    "timeout_segundos": 3600,
+    "intervalo_polling_segundos": 2.0,
+    "prompt_negativo_padrao": "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly, watermark, text overlay, subtitles"
+  },
+  "polimento": {
+    "fps_alvo": 30,
+    "escala_upscale": 2,
+    "modelo_escala": "realesrgan-x4plus",
+    "interpolador": "auto"
+  },
+  "montagem": {
+    "largura": 1024,
+    "altura": 640,
+    "fps": 30,
+    "transicao": "corte",
+    "crf": 18,
+    "preset": "medium"
+  },
+  "referencia_facial": "assets/referencias/personagem_base.png",
+  "diretorios": {
+    "raw": "inputs/projeto_atual",
+    "temp": "temp",
+    "outputs": "outputs"
+  },
+  "cenas": [
+    {
+      "id": "cena_01",
+      "prompt": "Close-up portrait of a young Brazilian tech developer talking directly to the camera, short dark hair, wearing a black t-shirt, modern office background softly blurred, warm cinematic lighting, shallow depth of field, realistic skin texture, 35mm film look.",
+      "negative_prompt": null,
+      "seed": 101,
+      "frames": 33,
+      "duracao_segundos": 2.75,
+      "aplicar_reactor": true,
+      "status": "pendente"
+    },
+    {
+      "id": "cena_02",
+      "prompt": "Medium shot of the same young Brazilian developer with short dark hair and black t-shirt, smiling while pointing at a glowing monitor displaying colorful software code, dark modern office, teal and orange cinematic lighting, realistic footage.",
+      "negative_prompt": null,
+      "seed": 102,
+      "frames": 33,
+      "duracao_segundos": 2.75,
+      "aplicar_reactor": true,
+      "status": "pendente"
+    },
+    {
+      "id": "cena_03",
+      "prompt": "Extreme close-up of hands typing rapidly on a mechanical keyboard with RGB backlight, dark aesthetic desk, bokeh lights in the background, macro lens, shallow depth of field, high detail, cinematic.",
+      "negative_prompt": null,
+      "seed": 103,
+      "frames": 33,
+      "duracao_segundos": 2.75,
+      "aplicar_reactor": false,
+      "status": "pendente"
+    },
+    {
+      "id": "cena_04",
+      "prompt": "Medium close-up of the same young Brazilian developer with short dark hair, giving a confident thumbs up and smiling at the camera, bright modern office, natural window light, realistic footage, 50mm lens.",
+      "negative_prompt": null,
+      "seed": 104,
+      "frames": 33,
+      "duracao_segundos": 2.75,
+      "aplicar_reactor": true,
+      "status": "pendente"
+    },
+    {
+      "id": "cena_05",
+      "prompt": "Over-the-shoulder shot of the developer writing system architecture diagrams on a glass whiteboard with a blue marker, modern office with plants, soft daylight, cinematic depth of field.",
+      "negative_prompt": null,
+      "seed": 105,
+      "frames": 33,
+      "duracao_segundos": 2.75,
+      "aplicar_reactor": false,
+      "status": "pendente"
+    },
+    {
+      "id": "cena_06",
+      "prompt": "Close-up of a laptop screen showing a code editor with colorful syntax highlighting, scrolling code, hands in the blurred foreground, dark room lit by the screen glow, cinematic bokeh.",
+      "negative_prompt": null,
+      "seed": 106,
+      "frames": 33,
+      "duracao_segundos": 2.75,
+      "aplicar_reactor": false,
+      "status": "pendente"
+    },
+    {
+      "id": "cena_07",
+      "prompt": "Side-lit portrait of the same young Brazilian developer putting on over-ear headphones, looking at the camera with a subtle smile, dark studio background, rim light, realistic skin texture, cinematic.",
+      "negative_prompt": null,
+      "seed": 107,
+      "frames": 33,
+      "duracao_segundos": 2.75,
+      "aplicar_reactor": true,
+      "status": "pendente"
+    },
+    {
+      "id": "cena_08",
+      "prompt": "Wide shot of a modern startup office at sunset, the young Brazilian developer standing near the window looking at the city skyline, warm golden light flooding the room, plants and monitors, cinematic camera move.",
+      "negative_prompt": null,
+      "seed": 108,
+      "frames": 33,
+      "duracao_segundos": 2.75,
+      "aplicar_reactor": true,
+      "status": "pendente"
+    }
   ]
 }
