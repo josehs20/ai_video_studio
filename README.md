@@ -123,6 +123,29 @@ Caminhos relativos são resolvidos a partir da raiz do projeto (diretório acima
 - **Transição `fade`**: fade-in/out para preto em cada clipe (mantém a duração).
   Não é crossfade (`xfade`), que exigiria recalcular offsets por clipe.
 - **Sem áudio**: o vídeo final é mudo (`-an`).
+- **ReActor v0.7.0-b1 tinha um bug** que zerava o lote de frames
+  (`if False and ...` + `pil_images = pil_images_sfw`), devolvendo **1 frame
+  preto 512×512**. Foi aplicado um patch local de 1 linha em
+  `ComfyUI/custom_nodes/ComfyUI-ReActor/nodes.py` (backup em
+  `nodes.py.bak_ai_video_studio`). Se o ReActor for atualizado, reaplique o
+  patch, senão as cenas com `aplicar_reactor: true` sairão com 1 frame.
+- **Polling resiliente**: o ComfyUI bloqueia o event loop durante nós pesados
+  (ReActor/GFPGAN), então `/history` pode ficar sem responder por dezenas de
+  segundos. O gerador tolera timeouts transitórios
+  (`geracao.timeout_requisicao_segundos`, padrão 120) sem abortar a cena.
+- **Cache do ComfyUI**: repetir o mesmo grafo/seed retorna o resultado em
+  milissegundos. Use `--nova-seed` (via `orchestrator.py`) para forçar um novo
+  render.
+
+## Desempenho medido (RTX 3050 6 GB, `--lowvram`)
+
+| Cenário | Tempo |
+|---|---|
+| LTX-Video 448×288, 25 frames, 20 steps | ~6 s de sampling (≈70 s com load inicial) |
+| ReActor (25 frames) + GFPGAN | ~65–90 s por cena |
+| Polimento (`minterpolate` + lanczos) | ~3 s por cena |
+| Montagem final (3 cenas, 1024×640) | ~1 s |
+
 - **VRAM**: se houver OOM, reduza `geracao.frames` (ex.: 25) ou a resolução
   (ex.: 448x288) antes de aumentar `steps`.
 

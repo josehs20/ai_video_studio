@@ -240,11 +240,19 @@ def aguardar_prompt(
     timeout_s: float,
     intervalo: float,
     logger: Any,
+    timeout_requisicao: float = 120.0,
     max_ausencias: int = 30,
+    max_falhas: int = 20,
 ) -> dict[str, Any]:
-    """Aguarda a execução real consultando `/history` e `/queue`."""
+    """Aguarda a execução real consultando `/history` e `/queue`.
+
+    Timeouts isolados de requisição são tratados como transitórios: o ComfyUI
+    bloqueia o event loop durante nós pesados (ex.: ReActor), então o polling
+    precisa sobreviver a janelas sem resposta.
+    """
     inicio = time.monotonic()
     ausencias = 0
+    falhas = 0
     ultimo_log = -30.0
     while True:
         decorrido = time.monotonic() - inicio
@@ -253,7 +261,23 @@ def aguardar_prompt(
                 f"prompt {prompt_id} não concluiu em {timeout_s:.0f}s "
                 "(verifique /history e os logs do ComfyUI)"
             )
-        historico = get_json(f"{url}/history/{prompt_id}", timeout=30.0)
+        try:
+            historico = get_json(
+                f"{url}/history/{prompt_id}", timeout=timeout_requisicao
+            )
+        except (RuntimeError, TimeoutError, OSError) as erro:
+            falhas += 1
+            logger.debug(
+                "consulta ao /history falhou (%d/%d): %s", falhas, max_falhas, erro
+            )
+            if falhas >= max_falhas:
+                raise RuntimeError(
+                    f"ComfyUI parou de responder ao /history após {falhas} tentativas: {erro}"
+                ) from erro
+            time.sleep(intervalo)
+            continue
+        falhas = 0
+
         registro = historico.get(prompt_id)
         if registro:
             status = registro.get("status") or {}
@@ -264,15 +288,20 @@ def aguardar_prompt(
         else:
             ausencias += 1
             if ausencias >= max_ausencias:
-                fila = get_json(f"{url}/queue", timeout=30.0)
-                em_execucao = [item[1] for item in (fila.get("queue_running") or [])]
-                pendentes = [item[1] for item in (fila.get("queue_pending") or [])]
-                if prompt_id not in em_execucao and prompt_id not in pendentes:
-                    raise RuntimeError(
-                        f"prompt {prompt_id} não está mais na fila nem no histórico "
-                        "(pode ter sido interrompido; reinicie a geração)"
-                    )
-                ausencias = 0
+                try:
+                    fila = get_json(f"{url}/queue", timeout=timeout_requisicao)
+                except (RuntimeError, TimeoutError, OSError) as erro:
+                    logger.debug("consulta ao /queue falhou: %s", erro)
+                    ausencias = 0
+                else:
+                    em_execucao = [item[1] for item in (fila.get("queue_running") or [])]
+                    pendentes = [item[1] for item in (fila.get("queue_pending") or [])]
+                    if prompt_id not in em_execucao and prompt_id not in pendentes:
+                        raise RuntimeError(
+                            f"prompt {prompt_id} não está mais na fila nem no histórico "
+                            "(pode ter sido interrompido; reinicie a geração)"
+                        )
+                    ausencias = 0
         if decorrido - ultimo_log >= 30.0:
             logger.info("  ... aguardando %s (%.0fs)", prompt_id, decorrido)
             ultimo_log = decorrido
@@ -314,6 +343,7 @@ def gerar_cena(
     logger: Any,
     intervalo: float,
     timeout_s: float,
+    timeout_requisicao: float = 120.0,
 ) -> Path:
     """Gera uma cena, copia o clipe bruto e atualiza o status."""
     cena_id = str(cena["id"])
@@ -336,7 +366,9 @@ def gerar_cena(
         cena.get("seed"),
         bool(cena.get("aplicar_reactor")),
     )
-    registro = aguardar_prompt(url, prompt_id, timeout_s, intervalo, logger)
+    registro = aguardar_prompt(
+        url, prompt_id, timeout_s, intervalo, logger, timeout_requisicao
+    )
 
     pasta_saida = (config.get("comfyui") or {}).get("output_dir")
     if not pasta_saida:
@@ -409,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     ).rstrip("/")
     intervalo = float(geracao.get("intervalo_polling_segundos", 2.0))
     timeout_s = float(geracao.get("timeout_segundos", 3600))
+    timeout_requisicao = float(geracao.get("timeout_requisicao_segundos", 120))
 
     workflow_path = resolver(
         raiz, config.get("workflow_api", "scripts/workflow_api.json")
@@ -474,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
                 logger,
                 intervalo,
                 timeout_s,
+                timeout_requisicao,
             )
         except (RuntimeError, ValueError, TimeoutError, FileNotFoundError) as erro:
             falhas += 1

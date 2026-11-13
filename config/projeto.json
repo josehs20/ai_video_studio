@@ -23,6 +23,7 @@
     "cfg": 3.0,
     "sampler": "euler",
     "timeout_segundos": 3600,
+    "timeout_requisicao_segundos": 120,
     "intervalo_polling_segundos": 2.0,
     "prompt_negativo_padrao": "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly, watermark, text overlay, subtitles"
   },
