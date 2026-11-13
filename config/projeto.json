@@ -1,0 +1,12 @@
+{
+  "nome_projeto": "anuncio_astros21_01",
+  "fps_origem": 12,
+  "fps_alvo": 30,
+  "escala_upscale": 2,
+  "modelo_escala": "realesr-animevideov3",
+  "clipes": [
+    "inputs/cena_01.mp4",
+    "inputs/cena_02.mp4",
+    "inputs/cena_03.mp4"
+  ]
+}

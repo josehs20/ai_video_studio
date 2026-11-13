@@ -1,0 +1,28 @@
+---
+description: Regras globais de arquitetura, restrições de hardware (RTX 3050 6GB VRAM) e padrões do projeto ai_video_studio para o Cline IA.
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Regras Globais e Contexto do Projeto (`ai_video_studio`)
+
+## 1. Ambiente e Restrições de Hardware
+- **SO:** Ubuntu Linux
+- **GPU:** NVIDIA GeForce RTX 3050 Laptop (6 GB VRAM) — CRÍTICO.
+- **Servidor ComfyUI:** Rodando localmente em `http://127.0.0.1:8188` com flag `--lowvram`.
+- **Regra de Ouro de VRAM:** Nunca tentar gerar vídeos longos (20s+) ou em alta resolução (1080p) diretamente no ComfyUI. Sempre gerar clipes curtos de 3 a 5 segundos (25 a 33 frames) em baixa resolução (ex: `480x832` ou `512x320`) e delegar fluidez (RIFE) e escala (Real-ESRGAN) para o pós-processamento.
+
+## 2. Estrutura de Diretórios Existente
+- `config/projeto.json`: Arquivo mestre de estado e roteiro das cenas.
+- `scripts/gerador_sequencia.py`: Cliente API HTTP/WebSocket para injetar prompts no ComfyUI e aguardar término real via `/history/{prompt_id}`.
+- `scripts/orchestrator.py`: Máquina de estados que gerencia geração -> consistência facial -> polimento -> montagem final.
+- `scripts/workflow_api.json`: Grafo validado exportado do ComfyUI em formato API.
+- `assets/referencias/personagem_base.png`: Imagem de referência facial para consistência com ReActor (`inswapper_128.onnx`).
+- `inputs/projeto_atual/`: Clipes brutos gerados pelo ComfyUI.
+- `temp/`: Arquivos intermediários interpolados e escalonados.
+- `outputs/`: Vídeo final renderizado (MP4).
+
+## 3. Padrões de Código Python
+- Utilizar Python 3.12+, tipagem estática (`typing`), `pathlib.Path` para manipulação de caminhos e `logging` estruturado em vez de `print` simples.
+- Todo processo externo (FFmpeg, RIFE, Real-ESRGAN) deve ser chamado via `subprocess.run(..., check=True)` com tratamento de erro e logs claros.
+- Implementar verificação de integridade de arquivos (rejeitar arquivos de 0 bytes ou corrompidos antes de processar).
