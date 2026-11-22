@@ -28,7 +28,10 @@ from common import (  # noqa: E402
     STATUS_ERRO,
     STATUS_GERADO,
     STATUS_PENDENTE,
+    ajustar_frames_ltx,
     atualizar_cena,
+    avaliar_candidato,
+    avaliar_orcamento_vram,
     caminho_relativo,
     carregar_json,
     carregar_projeto,
@@ -36,9 +39,12 @@ from common import (  # noqa: E402
     diretorios,
     exigir_arquivo_integro,
     ffprobe_info,
+    inspecionar_imagem,
+    nome_referencia_no_input,
     obter_cena,
     resolver,
     salvar_projeto,
+    sincronizar_para_input,
 )
 
 CLASSES_AMOSTRADOR = ("SamplerCustom", "KSampler", "KSamplerAdvanced")
@@ -82,6 +88,106 @@ def _nos_por_classe(grafo: dict[str, Any], *classes: str) -> list[str]:
     return [no_id for no_id, no in grafo.items() if str(no.get("class_type")) in classes]
 
 
+def _primeiro_no(grafo: dict[str, Any], *classes: str) -> str | None:
+    """Id do primeiro nó encontrado entre as classes informadas."""
+    ids = _nos_por_classe(grafo, *classes)
+    return ids[0] if ids else None
+
+
+def _novo_no_id(grafo: dict[str, Any]) -> str:
+    """Próximo id numérico livre (mantém o formato de string do grafo API)."""
+    numeros = [int(no_id) for no_id in grafo if str(no_id).isdigit()]
+    return str(max(numeros or [0]) + 1)
+
+
+def _referencias(grafo: dict[str, Any], no_id: str) -> int:
+    """Quantas entradas de outros nós apontam para `no_id`."""
+    alvo = str(no_id)
+    total = 0
+    for no in grafo.values():
+        for valor in (no.get("inputs") or {}).values():
+            if isinstance(valor, list) and len(valor) == 2 and str(valor[0]) == alvo:
+                total += 1
+    return total
+
+
+def _no_referencia_visual(grafo: dict[str, Any]) -> str | None:
+    """`LoadImage` que não alimenta o ReActor — ou seja, o print da cena."""
+    usados: set[str] = set()
+    for no_id in _nos_por_classe(grafo, "ReActorFaceSwap", "ReActorFaceSwapOpt"):
+        origem = (grafo[no_id].get("inputs") or {}).get("source_image")
+        if isinstance(origem, list) and origem:
+            usados.add(str(origem[0]))
+    for no_id in _nos_por_classe(grafo, "LoadImage"):
+        if no_id not in usados:
+            return no_id
+    return None
+
+
+def _frames_da_cena(cena: dict[str, Any], geracao: dict[str, Any]) -> int:
+    """Frames efetivos da cena, sempre normalizados para 8k+1 (LTX-Video)."""
+    return ajustar_frames_ltx(int(cena.get("frames") or geracao.get("frames", 33)))
+
+
+def _forca_referencia(cena: dict[str, Any], geracao: dict[str, Any]) -> float:
+    """Força do condicionamento por imagem (0.0–1.0), por cena ou global."""
+    valor = cena.get("forca_referencia")
+    if valor is None:
+        valor = geracao.get("forca_referencia", 0.65)
+    return min(max(float(valor), 0.0), 1.0)
+
+
+def _garantir_ramo_img2video(
+    grafo: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Devolve (nó LTXVImgToVideo, nó LoadImage da referência), criando-os se preciso."""
+    existente = _primeiro_no(grafo, "LTXVImgToVideo")
+    if existente:
+        return existente, _no_referencia_visual(grafo)
+
+    cond = _primeiro_no(grafo, "LTXVConditioning")
+    amostrador = _primeiro_no(grafo, *CLASSES_AMOSTRADOR)
+    if cond is None or amostrador is None:
+        raise RuntimeError(
+            "workflow_api.json sem LTXVConditioning/SamplerCustom: regenere com "
+            "python3 scripts/validar_ambiente.py --escrever-workflow"
+        )
+    entradas_cond = grafo[cond]["inputs"]
+    positivo = entradas_cond.get("positive")
+    negativo = entradas_cond.get("negative")
+    vae = None
+    for no_id in _nos_por_classe(grafo, "VAEDecode"):
+        vae = (grafo[no_id].get("inputs") or {}).get("vae") or vae
+    if not positivo or not negativo or not vae:
+        raise RuntimeError(
+            "não foi possível derivar conditioning/VAE do grafo para o modo imagem"
+        )
+
+    no_imagem = _no_referencia_visual(grafo)
+    if no_imagem is None:
+        no_imagem = _novo_no_id(grafo)
+        grafo[no_imagem] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": "print_tela.png"},
+        }
+    i2v = _novo_no_id(grafo)
+    grafo[i2v] = {
+        "class_type": "LTXVImgToVideo",
+        "inputs": {
+            "positive": positivo,
+            "negative": negativo,
+            "vae": vae,
+            "image": [no_imagem, 0],
+            "width": 512,
+            "height": 320,
+            "length": 33,
+            "batch_size": 1,
+            "strength": 0.65,
+        },
+    }
+    return i2v, no_imagem
+
+
 def _localizar_texto(
     grafo: dict[str, Any],
     referencia: Any,
@@ -108,16 +214,147 @@ def _localizar_texto(
     return None
 
 
+def _aplicar_img_to_video(
+    grafo: dict[str, Any],
+    cena: dict[str, Any],
+    config: dict[str, Any],
+    nome_imagem_ref: str | None,
+) -> None:
+    """Liga o ramo Image-to-Video (LoadImage -> LTXVImgToVideo -> sampler)."""
+    geracao = config.get("geracao") or {}
+    i2v, no_imagem = _garantir_ramo_img2video(grafo)
+    if no_imagem is None:
+        raise RuntimeError("workflow sem nó LoadImage disponível para a referência da cena")
+    largura = int(cena.get("largura") or geracao.get("largura", 512))
+    altura = int(cena.get("altura") or geracao.get("altura", 320))
+    frames = _frames_da_cena(cena, geracao)
+
+    if nome_imagem_ref:
+        grafo[no_imagem]["inputs"]["image"] = str(nome_imagem_ref)
+    grafo[i2v]["inputs"].update(
+        width=largura,
+        height=altura,
+        length=frames,
+        batch_size=1,
+        strength=_forca_referencia(cena, geracao),
+    )
+
+    cond = _primeiro_no(grafo, "LTXVConditioning")
+    if cond:
+        grafo[cond]["inputs"]["positive"] = [i2v, 0]
+        grafo[cond]["inputs"]["negative"] = [i2v, 1]
+    scheduler = _primeiro_no(grafo, "LTXVScheduler")
+    if scheduler:
+        grafo[scheduler]["inputs"]["latent"] = [i2v, 2]
+    for no_id in _nos_por_classe(grafo, *CLASSES_AMOSTRADOR):
+        entradas = grafo[no_id]["inputs"]
+        if "latent_image" in entradas:
+            entradas["latent_image"] = [i2v, 2]
+    # O latente vazio só é usado no fluxo Text-to-Video.
+    for no_id in _nos_por_classe(grafo, "EmptyLTXVLatentVideo"):
+        del grafo[no_id]
+
+
+def _aplicar_text_to_video(
+    grafo: dict[str, Any],
+    cena: dict[str, Any],
+    config: dict[str, Any],
+) -> None:
+    """Fallback Text-to-Video puro (quando `imagem_referencia` é null)."""
+    geracao = config.get("geracao") or {}
+    i2v = _primeiro_no(grafo, "LTXVImgToVideo")
+    positivo = negativo = None
+    if i2v:
+        entradas = grafo[i2v]["inputs"]
+        positivo = entradas.get("positive")
+        negativo = entradas.get("negative")
+        del grafo[i2v]
+    origem_visual = _no_referencia_visual(grafo)
+    if origem_visual:
+        del grafo[origem_visual]
+
+    largura = int(cena.get("largura") or geracao.get("largura", 512))
+    altura = int(cena.get("altura") or geracao.get("altura", 320))
+    frames = _frames_da_cena(cena, geracao)
+    latente = _primeiro_no(grafo, "EmptyLTXVLatentVideo")
+    if latente is None:
+        latente = _novo_no_id(grafo)
+        grafo[latente] = {
+            "class_type": "EmptyLTXVLatentVideo",
+            "inputs": {
+                "width": largura,
+                "height": altura,
+                "length": frames,
+                "batch_size": 1,
+            },
+        }
+    grafo[latente]["inputs"].update(width=largura, height=altura, length=frames)
+
+    cond = _primeiro_no(grafo, "LTXVConditioning")
+    if cond:
+        entradas = grafo[cond]["inputs"]
+        positivo = positivo or entradas.get("positive")
+        negativo = negativo or entradas.get("negative")
+        if positivo:
+            entradas["positive"] = positivo
+        if negativo:
+            entradas["negative"] = negativo
+    scheduler = _primeiro_no(grafo, "LTXVScheduler")
+    if scheduler:
+        grafo[scheduler]["inputs"]["latent"] = [latente, 0]
+    for no_id in _nos_por_classe(grafo, *CLASSES_AMOSTRADOR):
+        entradas = grafo[no_id]["inputs"]
+        if "latent_image" in entradas:
+            entradas["latent_image"] = [latente, 0]
+
+
+def _aplicar_reactor(grafo: dict[str, Any], cena: dict[str, Any]) -> None:
+    """Liga/desliga o ReActor. Desligado = bypass total (sem tocar nos frames)."""
+    ativo = bool(cena.get("aplicar_reactor", False))
+    reactores = _nos_por_classe(grafo, "ReActorFaceSwap", "ReActorFaceSwapOpt")
+    for no_id in reactores:
+        grafo[no_id]["inputs"]["enabled"] = ativo
+    if ativo or not reactores:
+        return
+
+    destino: list[Any] | None = None
+    fonte_id: str | None = None
+    for no_id in reactores:
+        entradas = grafo[no_id].get("inputs") or {}
+        referencia_entrada = entradas.get("input_image")
+        if isinstance(referencia_entrada, list) and referencia_entrada:
+            destino = list(referencia_entrada)
+        referencia_fonte = entradas.get("source_image")
+        if isinstance(referencia_fonte, list) and referencia_fonte:
+            fonte_id = str(referencia_fonte[0])
+        del grafo[no_id]
+    if destino is None:
+        return
+    for no in grafo.values():
+        for chave, valor in (no.get("inputs") or {}).items():
+            if isinstance(valor, list) and len(valor) == 2 and str(valor[0]) in reactores:
+                no["inputs"][chave] = destino
+    if fonte_id and _referencias(grafo, fonte_id) == 0:
+        grafo.pop(fonte_id, None)
+
+
 def injetar_parametros(
     workflow: dict[str, Any],
     cena: dict[str, Any],
     config: dict[str, Any],
+    nome_imagem_ref: str | None = None,
+    sufixo_saida: str | None = None,
 ) -> dict[str, Any]:
-    """Devolve uma cópia do grafo com os parâmetros da cena aplicados."""
+    """Devolve uma cópia do grafo com os parâmetros da cena aplicados.
+
+    Com `imagem_referencia` na cena o grafo roda em Image-to-Video
+    (`LoadImage` -> `LTXVImgToVideo`); sem ela, cai para Text-to-Video puro.
+    `nome_imagem_ref` é o nome do arquivo já copiado para `ComfyUI/input/`.
+    """
     grafo = copy.deepcopy(workflow)
     geracao = config.get("geracao") or {}
-    frames = int(cena.get("frames") or geracao.get("frames", 33))
-    fps = float(geracao.get("fps", 12))
+    frames = _frames_da_cena(cena, geracao)
+    fps = float(cena.get("fps") or geracao.get("fps", 12))
     largura = int(cena.get("largura") or geracao.get("largura", 512))
     altura = int(cena.get("altura") or geracao.get("altura", 320))
 
@@ -159,17 +396,26 @@ def injetar_parametros(
             if alvo:
                 grafo[alvo]["inputs"]["text"] = str(texto)
 
-    # ReActor: liga/desliga a troca facial por cena.
-    for no_id in _nos_por_classe(grafo, "ReActorFaceSwap", "ReActorFaceSwapOpt"):
-        grafo[no_id]["inputs"]["enabled"] = bool(cena.get("aplicar_reactor", False))
+    # Imagem de referência da cena x fallback Text-to-Video puro.
+    referencia = cena.get("imagem_referencia")
+    if referencia:
+        _aplicar_img_to_video(grafo, cena, config, nome_imagem_ref)
+    else:
+        _aplicar_text_to_video(grafo, cena, config)
 
-    # Nó de saída: prefixo por cena facilita localizar o arquivo no /history.
+    # ReActor: liga/desliga a troca facial por cena (desligado = bypass real).
+    _aplicar_reactor(grafo, cena)
+
+    # Nó de saída: prefixo por cena/seed facilita localizar o arquivo no /history.
+    prefixo = str(cena["id"])
+    if sufixo_saida:
+        prefixo = f"{prefixo}_{sufixo_saida}"
     for no_id in _nos_por_classe(
         grafo, "SaveAnimatedWEBP", "SaveVideo", "VHS_VideoCombine", "SaveImage"
     ):
         entradas = grafo[no_id]["inputs"]
         if "filename_prefix" in entradas:
-            entradas["filename_prefix"] = str(cena["id"])
+            entradas["filename_prefix"] = prefixo
         if "fps" in entradas:
             entradas["fps"] = fps
 
@@ -206,6 +452,52 @@ def sincronizar_referencia(
     if not destino.exists() or destino.stat().st_size != origem.stat().st_size:
         shutil.copy2(origem, destino)
     return destino
+
+
+def sincronizar_referencia_cena(
+    config: dict[str, Any],
+    raiz: Path,
+    cena: dict[str, Any],
+    logger: Any = None,
+) -> str | None:
+    """Copia a imagem de referência da cena para `ComfyUI/input/`.
+
+    Devolve o nome do arquivo como o nó `LoadImage` deve referenciá-lo, ou
+    `None` quando a cena não tem `imagem_referencia` (modo Text-to-Video).
+    """
+    referencia = cena.get("imagem_referencia")
+    if not referencia:
+        return None
+    origem = resolver(raiz, referencia)
+    inspecionar_imagem(origem, logger)
+    pasta_input = (config.get("comfyui") or {}).get("input_dir", "")
+    if not pasta_input:
+        raise ValueError(
+            "config.comfyui.input_dir não definido "
+            "(necessário para a imagem de referência das cenas)"
+        )
+    nome = nome_referencia_no_input(str(cena["id"]), origem)
+    destino = sincronizar_para_input(origem, resolver(raiz, pasta_input), nome)
+    if logger:
+        logger.info("%s: referência visual pronta em %s", cena["id"], destino)
+    return nome
+
+
+def nome_previsto_referencia(cena: dict[str, Any]) -> str | None:
+    """Nome de arquivo que a referência terá em `ComfyUI/input/` (para dry-run)."""
+    referencia = cena.get("imagem_referencia")
+    if not referencia:
+        return None
+    return nome_referencia_no_input(str(cena["id"]), Path(str(referencia)))
+
+
+def duracao_esperada(cena: dict[str, Any], config: dict[str, Any]) -> float:
+    """Duração em segundos implícita em `frames / fps` da cena."""
+    geracao = config.get("geracao") or {}
+    fps = float(cena.get("fps") or geracao.get("fps", 12))
+    if fps <= 0:
+        return 0.0
+    return _frames_da_cena(cena, geracao) / fps
 
 
 def enviar_prompt(url: str, workflow: dict[str, Any], timeout: float = 60.0) -> str:
@@ -333,6 +625,64 @@ def extrair_arquivo_saida(registro: dict[str, Any], pasta_saida: Path) -> Path:
 
 
 
+def _renderizar_seed(
+    cena: dict[str, Any],
+    config: dict[str, Any],
+    raiz: Path,
+    template: dict[str, Any],
+    url: str,
+    logger: Any,
+    intervalo: float,
+    timeout_s: float,
+    timeout_requisicao: float,
+    seed: int,
+    destino_base: Path,
+    sufixo_saida: str | None = None,
+) -> dict[str, Any]:
+    """Envia uma variação (seed) da cena e devolve o clipe copiado localmente."""
+    variacao = dict(cena)
+    variacao["seed"] = int(seed)
+    nome_ref = sincronizar_referencia_cena(config, raiz, variacao, logger)
+    grafo = injetar_parametros(
+        template,
+        variacao,
+        config,
+        nome_imagem_ref=nome_ref,
+        sufixo_saida=sufixo_saida,
+    )
+    if not _nos_por_classe(grafo, *CLASSES_TEXTO):
+        raise RuntimeError(
+            "workflow_api.json não possui nó de texto (CLIPTextEncode). "
+            "Rode: python3 scripts/validar_ambiente.py --escrever-workflow"
+        )
+    sincronizar_referencia(config, raiz, [variacao])
+    prompt_id = enviar_prompt(url, grafo)
+    logger.info(
+        "%s: seed %s enviada (prompt_id=%s, modo=%s, ref=%s, reactor=%s)",
+        cena["id"],
+        seed,
+        prompt_id,
+        "img2video" if nome_ref else "text2video",
+        nome_ref or "-",
+        bool(cena.get("aplicar_reactor")),
+    )
+    registro = aguardar_prompt(
+        url, prompt_id, timeout_s, intervalo, logger, timeout_requisicao
+    )
+
+    pasta_saida = (config.get("comfyui") or {}).get("output_dir")
+    if not pasta_saida:
+        raise ValueError("config.comfyui.output_dir não definido")
+    arquivo = extrair_arquivo_saida(registro, resolver(raiz, pasta_saida))
+    destino = destino_base.with_suffix(arquivo.suffix.lower())
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(arquivo, destino)
+    exigir_arquivo_integro(
+        destino, minimo_bytes=1024, descricao=f"clipe bruto {cena['id']} (seed {seed})"
+    )
+    return {"seed": int(seed), "prompt_id": prompt_id, "arquivo": destino}
+
+
 def gerar_cena(
     cena: dict[str, Any],
     config: dict[str, Any],
@@ -344,42 +694,118 @@ def gerar_cena(
     intervalo: float,
     timeout_s: float,
     timeout_requisicao: float = 120.0,
+    candidatos: int | None = None,
+    ignorar_limite_vram: bool = False,
 ) -> Path:
-    """Gera uma cena, copia o clipe bruto e atualiza o status."""
+    """Gera N candidatos por cena, valida e promove o melhor para `_raw`."""
     cena_id = str(cena["id"])
     if not cena.get("prompt"):
         raise ValueError(f"{cena_id}: campo 'prompt' vazio")
+    geracao = config.get("geracao") or {}
+    largura = int(cena.get("largura") or geracao.get("largura", 512))
+    altura = int(cena.get("altura") or geracao.get("altura", 320))
+    frames = _frames_da_cena(cena, geracao)
+    steps = int(cena.get("steps") or geracao.get("steps", 25))
+    avisos = avaliar_orcamento_vram(largura, altura, frames, steps)
+    if avisos:
+        for aviso in avisos:
+            logger.warning("%s: %s", cena_id, aviso)
+        if not ignorar_limite_vram:
+            raise ValueError(
+                f"{cena_id}: pode estourar 6 GB de VRAM ({'; '.join(avisos)}). "
+                "Ajuste largura<=512/altura<=320/frames<=49 ou use "
+                "--ignorar-limite-vram se souber o que está fazendo."
+            )
 
-    grafo = injetar_parametros(template, cena, config)
-    if not _nos_por_classe(grafo, *CLASSES_TEXTO):
-        raise RuntimeError(
-            "workflow_api.json não possui nó de texto (CLIPTextEncode). "
-            "Rode: python3 scripts/validar_ambiente.py --escrever-workflow"
+    quantidade = max(
+        1,
+        int(
+            candidatos
+            or cena.get("candidatos_por_cena")
+            or geracao.get("candidatos_por_cena")
+            or 1
+        ),
+    )
+    seeds = [int(cena.get("seed") or 0) + indice for indice in range(quantidade)]
+    pastas = diretorios(config, raiz)
+    pasta_raw = pastas["raw"]
+    pasta_raw.mkdir(parents=True, exist_ok=True)
+    pasta_cand = pastas["temp"] / "candidatos" / cena_id
+    esperado = duracao_esperada(cena, config)
+    registros: list[dict[str, Any]] = []
+
+    logger.info(
+        "%s: %d candidato(s), %dx%d@%df, ref=%s",
+        cena_id,
+        quantidade,
+        largura,
+        altura,
+        frames,
+        cena.get("imagem_referencia") or "-",
+    )
+    for indice, seed in enumerate(seeds, start=1):
+        logger.info("%s: candidato %d/%d (seed %d)", cena_id, indice, quantidade, seed)
+        if quantidade > 1:
+            destino_base = pasta_cand / f"seed_{seed}"
+            sufixo = f"s{seed}"
+        else:
+            destino_base = pasta_raw / f"{cena_id}_raw"
+            sufixo = None
+        resultado = _renderizar_seed(
+            cena,
+            config,
+            raiz,
+            template,
+            url,
+            logger,
+            intervalo,
+            timeout_s,
+            timeout_requisicao,
+            seed,
+            destino_base,
+            sufixo,
+        )
+        avaliacao = avaliar_candidato(resultado["arquivo"], logger, esperado or None)
+        registro = {
+            "seed": int(seed),
+            "arquivo": caminho_relativo(raiz, resultado["arquivo"]),
+            "prompt_id": resultado["prompt_id"],
+            "valido": avaliacao["valido"],
+            "pontuacao": avaliacao["pontuacao"],
+            "motivos": avaliacao["motivos"],
+            "info": avaliacao.get("info"),
+            "metricas": avaliacao.get("metricas"),
+        }
+        registros.append(registro)
+        atualizar_cena(config, cena_id, candidatos=registros)
+        salvar_projeto(config, projeto_path)
+        logger.info(
+            "%s: seed %d válido=%s pontuação=%.3f%s",
+            cena_id,
+            seed,
+            registro["valido"],
+            registro["pontuacao"],
+            "" if registro["valido"] else f" — {'; '.join(registro['motivos'])}",
         )
 
-    sincronizar_referencia(config, raiz, [cena])
-    prompt_id = enviar_prompt(url, grafo)
-    logger.info(
-        "%s enviada (prompt_id=%s, seed=%s, reactor=%s)",
-        cena_id,
-        prompt_id,
-        cena.get("seed"),
-        bool(cena.get("aplicar_reactor")),
-    )
-    registro = aguardar_prompt(
-        url, prompt_id, timeout_s, intervalo, logger, timeout_requisicao
-    )
 
-    pasta_saida = (config.get("comfyui") or {}).get("output_dir")
-    if not pasta_saida:
-        raise ValueError("config.comfyui.output_dir não definido")
-    arquivo = extrair_arquivo_saida(registro, resolver(raiz, pasta_saida))
-
-    pasta_raw = diretorios(config, raiz)["raw"]
-    pasta_raw.mkdir(parents=True, exist_ok=True)
-    destino = pasta_raw / f"{cena_id}_raw{arquivo.suffix.lower()}"
-    shutil.copy2(arquivo, destino)
+    validos = [registro for registro in registros if registro["valido"]]
+    if not validos:
+        resumo = " | ".join(
+            f"seed {r['seed']}: {'; '.join(r['motivos'])}" for r in registros
+        )
+        raise RuntimeError(
+            f"{cena_id}: nenhum dos {len(registros)} candidato(s) passou na "
+            f"validação ({resumo})"
+        )
+    escolhido = max(validos, key=lambda r: (r["pontuacao"], -int(r["seed"])))
+    origem = resolver(raiz, escolhido["arquivo"])
+    destino = pasta_raw / f"{cena_id}_raw{origem.suffix.lower()}"
+    if origem.resolve() != destino.resolve():
+        shutil.copy2(origem, destino)
     exigir_arquivo_integro(destino, minimo_bytes=1024, descricao=f"clipe bruto {cena_id}")
+    for registro in registros:
+        registro["escolhido"] = int(registro["seed"]) == int(escolhido["seed"])
 
     detalhes: dict[str, Any] = {}
     try:
@@ -392,15 +818,104 @@ def gerar_cena(
         cena_id,
         status=STATUS_GERADO,
         arquivo_raw=caminho_relativo(raiz, destino),
-        prompt_id=prompt_id,
-        seed=cena.get("seed"),
+        prompt_id=escolhido["prompt_id"],
+        seed=escolhido["seed"],
+        seed_escolhida=escolhido["seed"],
+        candidatos=registros,
         erro=None,
         info_raw=detalhes,
     )
     salvar_projeto(config, projeto_path)
     logger.info(
-        "%s gerada: %s (%.1f KB)", cena_id, destino.name, destino.stat().st_size / 1024
+        "%s gerada: seed %s de %d (%.1f KB) -> %s",
+        cena_id,
+        escolhido["seed"],
+        len(registros),
+        destino.stat().st_size / 1024,
+        destino.name,
     )
+    return destino
+
+
+def escolher_candidato(
+    cena: dict[str, Any],
+    seed_alvo: int,
+    config: dict[str, Any],
+    raiz: Path,
+    projeto_path: Path,
+    logger: Any,
+) -> Path:
+    """Promove um candidato já gerado (`temp/candidatos/<cena>/seed_X`) a `_raw`."""
+    cena_id = str(cena["id"])
+    pastas = diretorios(config, raiz)
+    pasta_cand = pastas["temp"] / "candidatos" / cena_id
+    encontrados = sorted(
+        arquivo
+        for arquivo in pasta_cand.glob(f"seed_{int(seed_alvo)}.*")
+        if arquivo.is_file()
+    )
+    if not encontrados:
+        raise FileNotFoundError(
+            f"{cena_id}: candidato da seed {seed_alvo} não encontrado em {pasta_cand}"
+        )
+    origem = encontrados[0]
+    avaliacao = avaliar_candidato(
+        origem, logger, duracao_esperada(cena, config) or None
+    )
+    if not avaliacao["valido"]:
+        logger.warning(
+            "%s: seed %s tem ressalvas: %s",
+            cena_id,
+            seed_alvo,
+            "; ".join(avaliacao["motivos"]),
+        )
+
+    pasta_raw = pastas["raw"]
+    pasta_raw.mkdir(parents=True, exist_ok=True)
+    destino = pasta_raw / f"{cena_id}_raw{origem.suffix.lower()}"
+    if origem.resolve() != destino.resolve():
+        shutil.copy2(origem, destino)
+    exigir_arquivo_integro(destino, minimo_bytes=1024, descricao=f"clipe bruto {cena_id}")
+
+    registros = [
+        dict(registro)
+        for registro in (cena.get("candidatos") or [])
+        if int(registro.get("seed", -1)) != int(seed_alvo)
+    ]
+    registros.append(
+        {
+            "seed": int(seed_alvo),
+            "arquivo": caminho_relativo(raiz, origem),
+            "valido": avaliacao["valido"],
+            "pontuacao": avaliacao["pontuacao"],
+            "motivos": avaliacao["motivos"],
+            "info": avaliacao.get("info"),
+            "metricas": avaliacao.get("metricas"),
+        }
+    )
+    registros.sort(key=lambda registro: int(registro.get("seed") or 0))
+    for registro in registros:
+        registro["escolhido"] = int(registro.get("seed") or 0) == int(seed_alvo)
+
+    detalhes: dict[str, Any] = {}
+    try:
+        detalhes = ffprobe_info(destino, logger)
+    except RuntimeError as erro:
+        logger.warning("%s: ffprobe não leu o bruto (%s)", cena_id, erro)
+
+    atualizar_cena(
+        config,
+        cena_id,
+        status=STATUS_GERADO,
+        arquivo_raw=caminho_relativo(raiz, destino),
+        seed=int(seed_alvo),
+        seed_escolhida=int(seed_alvo),
+        candidatos=registros,
+        erro=None,
+        info_raw=detalhes,
+    )
+    salvar_projeto(config, projeto_path)
+    logger.info("%s: seed %s promovida para %s", cena_id, seed_alvo, destino.name)
     return destino
 
 
@@ -430,6 +945,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Valida a injeção sem enviar")
     parser.add_argument("--url", default=None, help="Sobrescreve config.comfyui.url")
     parser.add_argument("--parar-no-erro", action="store_true")
+    parser.add_argument(
+        "--candidatos",
+        type=int,
+        default=None,
+        help="Candidatos por cena (sobrescreve candidatos_por_cena do config)",
+    )
+    parser.add_argument(
+        "--escolher-seed",
+        type=int,
+        default=None,
+        help="Promove um candidato já gerado (temp/candidatos) sem re-renderizar",
+    )
+    parser.add_argument(
+        "--ignorar-limite-vram",
+        action="store_true",
+        help="Permite configurações acima do orçamento seguro de VRAM",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -455,6 +987,52 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     template = carregar_json(workflow_path)
 
+    if args.escolher_seed is not None:
+        if args.dry_run:
+            logger.error("--escolher-seed não combina com --dry-run")
+            return 2
+        if args.cena:
+            alvos_cenas = [obter_cena(config, alvo) for alvo in args.cena]
+        else:
+            pasta_cand = diretorios(config, raiz)["temp"] / "candidatos"
+            padrao = f"seed_{int(args.escolher_seed)}.*"
+            alvos_cenas = [
+                cena
+                for cena in config.get("cenas", [])
+                if any(
+                    arquivo.is_file()
+                    for arquivo in (pasta_cand / str(cena["id"])).glob(padrao)
+                )
+            ]
+            if not alvos_cenas:
+                logger.error(
+                    "Nenhuma cena tem candidato da seed %s em temp/candidatos. "
+                    "Use --cena para trocar por uma seed existente.",
+                    args.escolher_seed,
+                )
+                return 1
+            logger.info(
+                "Seed %s encontrada em: %s",
+                args.escolher_seed,
+                ", ".join(str(cena["id"]) for cena in alvos_cenas),
+            )
+        if not alvos_cenas:
+            logger.error(
+                "Nenhum candidato em temp/candidatos para promover. "
+                "Rode com --candidatos N primeiro."
+            )
+            return 1
+        falhas_escolha = 0
+        for cena in alvos_cenas:
+            try:
+                escolher_candidato(
+                    cena, args.escolher_seed, config, raiz, projeto_path, logger
+                )
+            except (RuntimeError, ValueError, FileNotFoundError) as erro:
+                falhas_escolha += 1
+                logger.error("%s: %s", cena.get("id"), erro)
+        return 1 if falhas_escolha else 0
+
     cenas = selecionar_cenas(config, args.cena, args.forcar)
     if not cenas:
         logger.info("Nenhuma cena para gerar (todas já estão além de 'pendente').")
@@ -463,29 +1041,60 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("%d cena(s) na fila: %s", len(cenas), ", ".join(c["id"] for c in cenas))
 
     if args.dry_run:
+        geracao_dry = config.get("geracao") or {}
         for cena in cenas:
-            grafo = injetar_parametros(template, cena, config)
+            nome_ref = nome_previsto_referencia(cena)
+            grafo = injetar_parametros(
+                template, cena, config, nome_imagem_ref=nome_ref
+            )
             amostradores = _nos_por_classe(grafo, *CLASSES_AMOSTRADOR)
             seeds = [
                 grafo[no]["inputs"].get("noise_seed", grafo[no]["inputs"].get("seed"))
                 for no in amostradores
             ]
-            latentes = _nos_por_classe(grafo, "EmptyLTXVLatentVideo")
-            if latentes:
-                entradas = grafo[latentes[0]]["inputs"]
-                dimensoes = (
-                    f"{entradas.get('width')}x{entradas.get('height')}"
-                    f"@{entradas.get('length')}f"
-                )
+            referencias = _nos_por_classe(grafo, "LTXVImgToVideo")
+            if referencias:
+                entradas = grafo[referencias[0]]["inputs"]
             else:
-                dimensoes = "latente não encontrado"
+                latentes = _nos_por_classe(grafo, "EmptyLTXVLatentVideo")
+                entradas = (
+                    grafo[latentes[0]]["inputs"]
+                    if latentes
+                    else {}
+                )
+            dimensoes = (
+                f"{entradas.get('width')}x{entradas.get('height')}"
+                f"@{entradas.get('length')}f"
+            )
+            avisos = avaliar_orcamento_vram(
+                int(entradas.get("width") or 0),
+                int(entradas.get("height") or 0),
+                int(entradas.get("length") or 0),
+                int(cena.get("steps") or geracao_dry.get("steps", 25)),
+            )
+            quantidade = max(
+                1,
+                int(
+                    args.candidatos
+                    or cena.get("candidatos_por_cena")
+                    or geracao_dry.get("candidatos_por_cena")
+                    or 1
+                ),
+            )
             logger.info(
-                "[dry-run] %s | %s | seeds=%s | reactor=%s",
+                "[dry-run] %s | %s | modo=%s | ref=%s | seeds=%s | "
+                "força=%.2f | reactor=%s | candidatos=%d",
                 cena["id"],
                 dimensoes,
+                "img2video" if nome_ref else "text2video",
+                cena.get("imagem_referencia") or "-",
                 seeds,
+                float(cena.get("forca_referencia") or geracao_dry.get("forca_referencia", 0.65)),
                 bool(cena.get("aplicar_reactor")),
+                quantidade,
             )
+            for aviso in avisos:
+                logger.warning("[dry-run] %s: %s", cena["id"], aviso)
         return 0
 
     try:
@@ -508,6 +1117,8 @@ def main(argv: list[str] | None = None) -> int:
                 intervalo,
                 timeout_s,
                 timeout_requisicao,
+                candidatos=args.candidatos,
+                ignorar_limite_vram=args.ignorar_limite_vram,
             )
         except (RuntimeError, ValueError, TimeoutError, FileNotFoundError) as erro:
             falhas += 1

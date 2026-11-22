@@ -4,11 +4,15 @@ Estratégia (ordem do spec 03):
 1. Extrai frames do clipe bruto na taxa nativa (`geracao.fps`).
 2. Interpola: `rife-ncnn-vulkan` quando instalado; senão FFmpeg `minterpolate`.
 3. Escala: `realesrgan-ncnn-vulkan` quando instalado; senão `scale` lanczos.
-4. Encoda H.264 (`yuv420p`, `fps_alvo`) em `temp/{cena}_polido.mp4`.
+4. Encoda H.264 (`yuv420p`, `fps_alvo`) em `temp/{cena}_polido.mp4`, aplicando
+   o acabamento configurável de `polimento.nitidez` (`unsharp`),
+   `polimento.reducao_ruido` (`hqdn3d`) e `polimento.micro_contraste` (`eq`).
 
 Uso:
     python3 scripts/polimento.py
     python3 scripts/polimento.py --cena cena_02 --forcar --interpolador minterpolate
+    python3 scripts/polimento.py --nitidez 0.8 --reducao-ruido 0.2
+    python3 scripts/polimento.py --sem-filtros
 """
 from __future__ import annotations
 
@@ -218,6 +222,42 @@ def escalar_com_realesrgan(
     return destino
 
 
+def _filtros_de_qualidade(
+    polimento: dict[str, Any],
+    opcoes: argparse.Namespace,
+) -> list[str]:
+    """Acabamento do encode final: denoise (`hqdn3d`), nitidez e micro-contraste.
+
+    Os valores vêm de `polimento.nitidez` (0–2, 0 desliga), `polimento.
+    reducao_ruido` (0–1, 0 desliga) e `polimento.micro_contraste` (bool), com
+    override por CLI. `--sem-filtros` devolve lista vazia (só escala/fps).
+    """
+    if getattr(opcoes, "sem_filtros", False):
+        return []
+    nitidez_opt = getattr(opcoes, "nitidez", None)
+    ruido_opt = getattr(opcoes, "reducao_ruido", None)
+    nitidez = float(nitidez_opt if nitidez_opt is not None else polimento.get("nitidez", 0.6))
+    ruido = float(
+        ruido_opt if ruido_opt is not None else polimento.get("reducao_ruido", 0.35)
+    )
+    micro = bool(polimento.get("micro_contraste", True))
+    if getattr(opcoes, "sem_micro_contraste", False):
+        micro = False
+
+    filtros: list[str] = []
+    ruido = min(max(ruido, 0.0), 1.0)
+    if ruido > 0:
+        filtros.append(
+            f"hqdn3d={3 * ruido:.2f}:{2 * ruido:.2f}:{4 * ruido:.2f}:{3 * ruido:.2f}"
+        )
+    nitidez = min(max(nitidez, 0.0), 2.0)
+    if nitidez > 0:
+        filtros.append(f"unsharp=5:5:{nitidez:.2f}:5:5:0")
+    if micro:
+        filtros.append("eq=contrast=1.05:saturation=1.03")
+    return filtros
+
+
 def _encodar_final(
     entrada: Path,
     saida: Path,
@@ -225,12 +265,14 @@ def _encodar_final(
     escala_pendente: int,
     crf: int,
     logger: Any,
+    filtros_qualidade: list[str] | None = None,
 ) -> Path:
-    """Encode final H.264 normalizando fps, escala e pix_fmt."""
+    """Encode final H.264 normalizando fps, escala, acabamento e pix_fmt."""
     filtros: list[str] = []
     if escala_pendente > 1:
         filtros.append(f"scale=iw*{escala_pendente}:ih*{escala_pendente}:flags=lanczos")
     filtros.append(f"fps={fps_alvo}")
+    filtros.extend(filtros_qualidade or [])
     filtros.append("format=yuv420p")
     executar(
         [
@@ -342,7 +384,18 @@ def processar_cena(
 
     intermediario = montar_video(fonte_frames, fps_base, workdir / "pre_final.mp4", logger)
     destino = bruto_dir / f"{cena_id}_polido.mp4"
-    _encodar_final(intermediario, destino, fps_alvo, escala_pendente, int(opcoes.crf), logger)
+    filtros = _filtros_de_qualidade(polimento, opcoes)
+    if filtros:
+        logger.info("%s: acabamento -> %s", cena_id, ", ".join(filtros))
+    _encodar_final(
+        intermediario,
+        destino,
+        fps_alvo,
+        escala_pendente,
+        int(opcoes.crf),
+        logger,
+        filtros_qualidade=filtros,
+    )
 
     info = ffprobe_info(destino, logger)
     if info["duracao"] <= 0:
@@ -402,6 +455,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--escala", type=int, default=None, help="Fator de upscale")
     parser.add_argument("--fps", type=float, default=None, help="fps final")
+    parser.add_argument(
+        "--nitidez",
+        type=float,
+        default=None,
+        help="Força do unsharp (0 desliga; padrão de polimento.nitidez)",
+    )
+    parser.add_argument(
+        "--reducao-ruido",
+        type=float,
+        default=None,
+        help="Força do hqdn3d 0–1 (0 desliga; padrão de polimento.reducao_ruido)",
+    )
+    parser.add_argument(
+        "--sem-micro-contraste",
+        action="store_true",
+        help="Não aplica o eq de contraste/saturação",
+    )
+    parser.add_argument(
+        "--sem-filtros",
+        action="store_true",
+        help="Desliga denoise/nitidez/micro-contraste (só escala + fps)",
+    )
     parser.add_argument("--crf", type=int, default=18)
     parser.add_argument("--manter-temp", action="store_true", help="Não apaga frames temporários")
     parser.add_argument("--parar-no-erro", action="store_true")

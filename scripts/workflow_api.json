@@ -16,7 +16,7 @@
   "3": {
     "class_type": "CLIPTextEncode",
     "inputs": {
-      "text": "Close-up portrait of a young Brazilian tech developer talking directly to the camera, short dark hair, wearing a black t-shirt, modern office background softly blurred, warm cinematic lighting, shallow depth of field, realistic skin texture, 35mm film look.",
+      "text": "Medium close-up of a person speaking naturally toward the camera, subtle mouth movement as if talking, expressive eyes, natural slight head motion, soft key light on face, dark clean background with shallow depth of field, realistic skin texture, cinematic 35mm look.",
       "clip": [
         "1",
         0
@@ -53,13 +53,13 @@
         "4",
         0
       ],
-      "frame_rate": 12.0
+      "frame_rate": 16.0
     }
   },
   "7": {
     "class_type": "LTXVScheduler",
     "inputs": {
-      "steps": 25,
+      "steps": 30,
       "max_shift": 2.05,
       "base_shift": 0.95,
       "stretch": true,
@@ -84,7 +84,7 @@
         0
       ],
       "add_noise": true,
-      "noise_seed": 101,
+      "noise_seed": 777,
       "cfg": 3.0,
       "positive": [
         "6",
@@ -158,7 +158,7 @@
         "11",
         0
       ],
-      "fps": 12.0
+      "fps": 16.0
     }
   },
   "14": {
@@ -168,7 +168,7 @@
         "13",
         0
       ],
-      "filename_prefix": "cena_01",
+      "filename_prefix": "cena_teste_fala",
       "format": "mp4",
       "codec": "h264"
     }

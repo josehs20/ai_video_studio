@@ -1,5 +1,5 @@
 {
-  "nome_projeto": "anuncio_astros21_01",
+  "nome_projeto": "anuncio_olho_api_01",
   "versao_schema": 2,
   "motor": "ltx-video",
   "workflow_api": "scripts/workflow_api.json",
@@ -18,20 +18,25 @@
     "largura": 512,
     "altura": 320,
     "frames": 33,
-    "fps": 12,
-    "steps": 25,
+    "fps": 16,
+    "steps": 30,
     "cfg": 3.0,
     "sampler": "euler",
-    "timeout_segundos": 3600,
-    "timeout_requisicao_segundos": 120,
+    "timeout_segundos": 7200,
+    "timeout_requisicao_segundos": 180,
     "intervalo_polling_segundos": 2.0,
-    "prompt_negativo_padrao": "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly, watermark, text overlay, subtitles"
+    "prompt_negativo_padrao": "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly, watermark, text overlay, subtitles",
+    "candidatos_por_cena": 2,
+    "forca_referencia": 0.65
   },
   "polimento": {
     "fps_alvo": 30,
     "escala_upscale": 2,
     "modelo_escala": "realesrgan-x4plus",
-    "interpolador": "auto"
+    "interpolador": "auto",
+    "nitidez": 0.6,
+    "reducao_ruido": 0.35,
+    "micro_contraste": true
   },
   "montagem": {
     "largura": 1024,
@@ -49,84 +54,138 @@
   },
   "cenas": [
     {
-      "id": "cena_01",
-      "prompt": "Close-up portrait of a young Brazilian tech developer talking directly to the camera, short dark hair, wearing a black t-shirt, modern office background softly blurred, warm cinematic lighting, shallow depth of field, realistic skin texture, 35mm film look.",
+      "id": "cena_teste_fala",
+      "prompt": "Medium close-up of a person speaking naturally toward the camera, subtle mouth movement as if talking, expressive eyes, natural slight head motion, soft key light on face, dark clean background with shallow depth of field, realistic skin texture, cinematic 35mm look.",
       "negative_prompt": null,
-      "seed": 101,
+      "seed": 780,
       "frames": 33,
       "duracao_segundos": 2.75,
       "aplicar_reactor": true,
-      "status": "pendente"
-    },
-    {
-      "id": "cena_02",
-      "prompt": "Medium shot of the same young Brazilian developer with short dark hair and black t-shirt, smiling while pointing at a glowing monitor displaying colorful software code, dark modern office, teal and orange cinematic lighting, realistic footage.",
-      "negative_prompt": null,
-      "seed": 102,
-      "frames": 33,
-      "duracao_segundos": 2.75,
-      "aplicar_reactor": true,
-      "status": "pendente"
-    },
-    {
-      "id": "cena_03",
-      "prompt": "Extreme close-up of hands typing rapidly on a mechanical keyboard with RGB backlight, dark aesthetic desk, bokeh lights in the background, macro lens, shallow depth of field, high detail, cinematic.",
-      "negative_prompt": null,
-      "seed": 103,
-      "frames": 33,
-      "duracao_segundos": 2.75,
-      "aplicar_reactor": false,
-      "status": "pendente"
-    },
-    {
-      "id": "cena_04",
-      "prompt": "Medium close-up of the same young Brazilian developer with short dark hair, giving a confident thumbs up and smiling at the camera, bright modern office, natural window light, realistic footage, 50mm lens.",
-      "negative_prompt": null,
-      "seed": 104,
-      "frames": 33,
-      "duracao_segundos": 2.75,
-      "aplicar_reactor": true,
-      "status": "pendente"
-    },
-    {
-      "id": "cena_05",
-      "prompt": "Over-the-shoulder shot of the developer writing system architecture diagrams on a glass whiteboard with a blue marker, modern office with plants, soft daylight, cinematic depth of field.",
-      "negative_prompt": null,
-      "seed": 105,
-      "frames": 33,
-      "duracao_segundos": 2.75,
-      "aplicar_reactor": false,
-      "status": "pendente"
-    },
-    {
-      "id": "cena_06",
-      "prompt": "Close-up of a laptop screen showing a code editor with colorful syntax highlighting, scrolling code, hands in the blurred foreground, dark room lit by the screen glow, cinematic bokeh.",
-      "negative_prompt": null,
-      "seed": 106,
-      "frames": 33,
-      "duracao_segundos": 2.75,
-      "aplicar_reactor": false,
-      "status": "pendente"
-    },
-    {
-      "id": "cena_07",
-      "prompt": "Side-lit portrait of the same young Brazilian developer putting on over-ear headphones, looking at the camera with a subtle smile, dark studio background, rim light, realistic skin texture, cinematic.",
-      "negative_prompt": null,
-      "seed": 107,
-      "frames": 33,
-      "duracao_segundos": 2.75,
-      "aplicar_reactor": true,
-      "status": "pendente"
-    },
-    {
-      "id": "cena_08",
-      "prompt": "Wide shot of a modern startup office at sunset, the young Brazilian developer standing near the window looking at the city skyline, warm golden light flooding the room, plants and monitors, cinematic camera move.",
-      "negative_prompt": null,
-      "seed": 108,
-      "frames": 33,
-      "duracao_segundos": 2.75,
-      "aplicar_reactor": true,
-      "status": "pendente"
+      "imagem_referencia": null,
+      "status": "polido",
+      "candidatos": [
+        {
+          "seed": 779,
+          "arquivo": "temp/candidatos/cena_teste_fala/seed_779.mp4",
+          "prompt_id": "650d01c6-b102-4963-9cc1-71d3420a009f",
+          "valido": true,
+          "pontuacao": 0.4316,
+          "motivos": [],
+          "info": {
+            "largura": 512,
+            "altura": 320,
+            "fps": 16.0,
+            "frames": 33,
+            "codec": "h264",
+            "duracao": 2.062,
+            "tamanho": 41140
+          },
+          "metricas": {
+            "frames_analisados": 33,
+            "luma_media": 44.708,
+            "luma_desvio": 0.606,
+            "movimento_medio": 1.5974,
+            "movimento_maximo": 3.8269,
+            "fracao_quase_preta": 0.0,
+            "fracao_congelada": 0.0
+          },
+          "escolhido": false
+        },
+        {
+          "seed": 780,
+          "arquivo": "temp/candidatos/cena_teste_fala/seed_780.mp4",
+          "prompt_id": "15d37c7b-6e88-458e-a444-74c6d68656e0",
+          "valido": true,
+          "pontuacao": 0.4892,
+          "motivos": [],
+          "info": {
+            "largura": 512,
+            "altura": 320,
+            "fps": 16.0,
+            "frames": 33,
+            "codec": "h264",
+            "duracao": 2.062,
+            "tamanho": 49176
+          },
+          "metricas": {
+            "frames_analisados": 33,
+            "luma_media": 45.244,
+            "luma_desvio": 0.775,
+            "movimento_medio": 1.8687,
+            "movimento_maximo": 3.6946,
+            "fracao_quase_preta": 0.0,
+            "fracao_congelada": 0.0
+          },
+          "escolhido": true
+        },
+        {
+          "seed": 781,
+          "arquivo": "temp/candidatos/cena_teste_fala/seed_781.mp4",
+          "prompt_id": "bbca3cf5-bf7e-4078-b324-994d198f926d",
+          "valido": true,
+          "pontuacao": 0.2834,
+          "motivos": [],
+          "info": {
+            "largura": 512,
+            "altura": 320,
+            "fps": 16.0,
+            "frames": 33,
+            "codec": "h264",
+            "duracao": 2.062,
+            "tamanho": 37940
+          },
+          "metricas": {
+            "frames_analisados": 33,
+            "luma_media": 51.224,
+            "luma_desvio": 0.19,
+            "movimento_medio": 0.8978,
+            "movimento_maximo": 1.7216,
+            "fracao_quase_preta": 0.0,
+            "fracao_congelada": 0.0
+          },
+          "escolhido": false
+        }
+      ],
+      "atualizado_em": "2026-11-22T21:39:53+00:00",
+      "arquivo_raw": "inputs/projeto_atual/cena_teste_fala_raw.mp4",
+      "prompt_id": "15d37c7b-6e88-458e-a444-74c6d68656e0",
+      "seed_escolhida": 780,
+      "erro": null,
+      "info_raw": {
+        "largura": 512,
+        "altura": 320,
+        "fps": 16.0,
+        "frames": 33,
+        "codec": "h264",
+        "duracao": 2.062,
+        "tamanho": 49176
+      },
+      "arquivo_polido": "temp/cena_teste_fala_polido.mp4",
+      "info_polido": {
+        "largura": 1024,
+        "altura": 640,
+        "fps": 30.0,
+        "frames": 59,
+        "codec": "h264",
+        "duracao": 1.967,
+        "tamanho": 246557
+      }
     }
-  ]
+  ],
+  "ultimo_render": {
+    "arquivo": "outputs/anuncio_olho_api_01_final.mp4",
+    "gerado_em": "2026-11-22T18:15:53",
+    "transicao": "corte",
+    "cenas": [
+      "cena_01",
+      "cena_02",
+      "cena_03",
+      "cena_04",
+      "cena_05",
+      "cena_06"
+    ],
+    "duracao_segundos": 11.7,
+    "resolucao": "1024x640",
+    "fps": 30.0
+  }
 }

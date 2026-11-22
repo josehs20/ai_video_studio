@@ -1,15 +1,21 @@
 """Orquestrador do pipeline de vídeo (máquina de estados por cena).
 
 Etapas:
-    gerar  -> pendente/erro  -> gerado  (ComfyUI)
-    polir  -> gerado         -> polido  (RIFE/upscale)
-    montar -> polido         -> outputs/{nome}_final.mp4 (passe único FFmpeg)
+    gerar    -> pendente/erro -> gerado  (ComfyUI, N candidatos por cena)
+    escolher -> promove um candidato de `temp/candidatos/{cena}/seed_X` a `_raw`
+    polir    -> gerado -> polido  (RIFE/upscale)
+    montar   -> polido -> outputs/{nome}_final.mp4 (passe único FFmpeg)
+
+`gerar` já promove automaticamente o melhor candidato; `escolher` é a via
+manual (`--escolher-seed N`) para trocar a escolha sem re-renderizar.
 
 A lógica de montagem é exposta como funções puras (`construir_comando_montagem`,
 `planejar_montagem`) para reuso futuro na camada FastAPI.
 
 Uso:
     python3 scripts/orchestrator.py --etapa tudo
+    python3 scripts/orchestrator.py --etapa gerar --candidatos 3
+    python3 scripts/orchestrator.py --etapa escolher --escolher-seed 445 --refazer-cena cena_04
     python3 scripts/orchestrator.py --etapa montar --transicao fade
     python3 scripts/orchestrator.py --refazer-cena cena_03 --nova-seed 777
     python3 scripts/orchestrator.py --etapa status
@@ -47,7 +53,7 @@ from common import (  # noqa: E402
     salvar_projeto,
 )
 
-ETAPAS = ("tudo", "gerar", "polir", "montar", "status")
+ETAPAS = ("tudo", "gerar", "escolher", "polir", "montar", "status")
 
 
 def planejar_montagem(
@@ -264,13 +270,18 @@ def preparar_refazer(
 def executar_etapa(etapa: str, args: argparse.Namespace, logger: Any) -> int:
     """Delega a etapa para o módulo responsável, preservando o estado em disco."""
     alvos = list(args.refazer_cena or [])
-    if etapa in ("gerar", "polir"):
+    if etapa in ("gerar", "escolher", "polir"):
         argv = ["--projeto", args.projeto, "--log-level", args.log_level]
         if not alvos and args.forcar:
             argv.append("--forcar")
         for alvo in alvos:
             argv.extend(["--cena", alvo])
         if etapa == "gerar":
+            if args.candidatos is not None:
+                argv.extend(["--candidatos", str(int(args.candidatos))])
+            return gerador_sequencia.main(argv)
+        if etapa == "escolher":
+            argv.extend(["--escolher-seed", str(int(args.escolher_seed))])
             return gerador_sequencia.main(argv)
         return polimento.main(argv)
 
@@ -292,6 +303,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Id de cena a regenerar (repetível), preservando as demais",
     )
     parser.add_argument("--nova-seed", type=int, default=None)
+    parser.add_argument(
+        "--candidatos",
+        type=int,
+        default=None,
+        help="Quantos candidatos por cena gerar (sobrescreve candidatos_por_cena)",
+    )
+    parser.add_argument(
+        "--escolher-seed",
+        type=int,
+        default=None,
+        help="Seed já gerada em temp/candidatos que será promovida a '_raw'",
+    )
     parser.add_argument("--forcar", action="store_true", help="Refaz cenas já concluídas")
     parser.add_argument("--transicao", choices=("corte", "fade"), default=None)
     parser.add_argument("--continuar-em-erro", action="store_true")
@@ -301,10 +324,14 @@ def main(argv: list[str] | None = None) -> int:
     logger = configurar_logging(args.log_level)
     if args.nova_seed is not None and not args.refazer_cena:
         parser.error("--nova-seed exige --refazer-cena")
+    if args.escolher_seed is not None and args.etapa != "escolher":
+        parser.error("--escolher-seed exige --etapa escolher")
+    if args.etapa == "escolher" and args.escolher_seed is None:
+        parser.error("--etapa escolher exige --escolher-seed N")
 
     config, projeto_path, raiz = carregar_projeto(args.projeto)
 
-    if args.refazer_cena:
+    if args.refazer_cena and args.etapa != "escolher":
         try:
             preparar_refazer(
                 config, projeto_path, raiz, args.refazer_cena, args.nova_seed, logger

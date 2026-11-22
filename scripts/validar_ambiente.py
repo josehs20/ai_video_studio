@@ -1,13 +1,17 @@
 """Diagnóstico do ambiente ComfyUI e geração/validação do `workflow_api.json`.
 
-O grafo gerado segue o template oficial do ComfyUI para LTX-Video 0.9.x
-(`ltxv_text_to_video`): checkpoint apenas para MODEL/VAE, CLIPLoader `ltxv`
-para o T5-XXL, `EmptyLTXVLatentVideo` + `LTXVConditioning` + `LTXVScheduler`
-+ `SamplerCustom` para a amostragem.
+O grafo gerado segue os templates oficiais do ComfyUI para LTX-Video 0.9.x:
+- Text-to-Video (`ltxv_text_to_video`): checkpoint só para MODEL/VAE, CLIPLoader
+  `ltxv` para o T5-XXL, `EmptyLTXVLatentVideo` + `LTXVConditioning` +
+  `LTXVScheduler` + `SamplerCustom`.
+- Image-to-Video (`ltxv_image_to_video`): `LoadImage` -> `LTXVImgToVideo`
+  (quantização por `strength`), cujos outputs alimentam conditioning, scheduler
+  e sampler. É o modo usado quando alguma cena define `imagem_referencia`.
 
 Uso:
     python3 scripts/validar_ambiente.py
     python3 scripts/validar_ambiente.py --escrever-workflow
+    python3 scripts/validar_ambiente.py --escrever-workflow --i2v
     python3 scripts/validar_ambiente.py --url http://127.0.0.1:8188 --log-level DEBUG
 """
 from __future__ import annotations
@@ -23,12 +27,18 @@ from urllib import error, request
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
+    ajustar_frames_ltx,
+    avaliar_orcamento_vram,
     carregar_json,
     carregar_projeto,
     configurar_logging,
+    decompor_orcamento,
     exigir_arquivo_integro,
+    inspecionar_imagem,
+    nome_referencia_no_input,
     resolver,
     salvar_json_atomico,
+    sincronizar_para_input,
 )
 
 EXTENSOES_MODELO = (".safetensors", ".onnx", ".pth", ".ckpt", ".pt", ".bin")
@@ -81,15 +91,139 @@ def localizar_modelo(models_dir: Path, nome_arquivo: str) -> Path | None:
 
 
 
-def construir_workflow_template(config: dict[str, Any]) -> dict[str, Any]:
-    """Monta o grafo LTX-Video em formato API a partir do JSON do projeto."""
+def cena_com_referencia(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Primeira cena que define `imagem_referencia` (None = projeto só T2V)."""
+    for cena in config.get("cenas") or []:
+        if cena.get("imagem_referencia"):
+            return cena
+    return None
+
+
+def _ramo_img2video(
+    primeira: dict[str, Any],
+    cena_ref: dict[str, Any],
+    geracao: dict[str, Any],
+    modelos: dict[str, Any],
+    largura: int,
+    altura: int,
+    frames: int,
+    fps: float,
+    steps: int,
+    cfg: float,
+    sampler: str,
+    referencia_facial: str,
+) -> dict[str, Any]:
+    """Nós do template oficial `ltxv_image_to_video` (ids 5..15)."""
+    forca = cena_ref.get("forca_referencia")
+    if forca is None:
+        forca = geracao.get("forca_referencia", 0.65)
+    nome_ref = nome_referencia_no_input(
+        str(cena_ref["id"]), Path(str(cena_ref["imagem_referencia"]))
+    )
+    return {
+        "5": {"class_type": "LoadImage", "inputs": {"image": nome_ref}},
+        "6": {
+            "class_type": "LTXVConditioning",
+            "inputs": {"positive": ["7", 0], "negative": ["7", 1], "frame_rate": fps},
+        },
+        "7": {
+            "class_type": "LTXVImgToVideo",
+            "inputs": {
+                "positive": ["3", 0],
+                "negative": ["4", 0],
+                "vae": ["2", 2],
+                "image": ["5", 0],
+                "width": largura,
+                "height": altura,
+                "length": frames,
+                "batch_size": 1,
+                "strength": min(max(float(forca), 0.0), 1.0),
+            },
+        },
+        "8": {
+            "class_type": "LTXVScheduler",
+            "inputs": {
+                "steps": steps,
+                "max_shift": 2.05,
+                "base_shift": 0.95,
+                "stretch": True,
+                "terminal": 0.1,
+                "latent": ["7", 2],
+            },
+        },
+        "9": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": sampler}},
+        "10": {
+            "class_type": "SamplerCustom",
+            "inputs": {
+                "model": ["2", 0],
+                "add_noise": True,
+                "noise_seed": int(primeira.get("seed", 42)),
+                "cfg": cfg,
+                "positive": ["6", 0],
+                "negative": ["6", 1],
+                "sampler": ["9", 0],
+                "sigmas": ["8", 0],
+                "latent_image": ["7", 2],
+            },
+        },
+        "11": {
+            "class_type": "ReActorFaceSwap",
+            "inputs": {
+                "enabled": bool(primeira.get("aplicar_reactor", False)),
+                "input_image": ["13", 0],
+                "swap_model": modelos.get("reactor_swap", "inswapper_128.onnx"),
+                "facedetection": "retinaface_resnet50",
+                "face_restore_model": modelos.get("reactor_restore", "GFPGANv1.4.pth"),
+                "face_restore_visibility": 1.0,
+                "codeformer_weight": 0.5,
+                "detect_gender_input": "no",
+                "detect_gender_source": "no",
+                "input_faces_index": "0",
+                "source_faces_index": "0",
+                "console_log_level": 1,
+                "source_image": ["12", 0],
+            },
+        },
+        "12": {"class_type": "LoadImage", "inputs": {"image": referencia_facial}},
+        "13": {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["2", 2]}},
+        "14": {"class_type": "CreateVideo", "inputs": {"images": ["11", 0], "fps": fps}},
+        "15": {
+            "class_type": "SaveVideo",
+            "inputs": {
+                "video": ["14", 0],
+                "filename_prefix": str(primeira.get("id", "cena_01")),
+                "format": "mp4",
+                "codec": "h264",
+            },
+        },
+    }
+
+
+def construir_workflow_template(
+    config: dict[str, Any],
+    i2v: bool | None = None,
+) -> dict[str, Any]:
+    """Monta o grafo LTX-Video em formato API a partir do JSON do projeto.
+
+    Com `i2v=True` — ou quando alguma cena define `imagem_referencia` — o grafo
+    segue o template oficial `ltxv_image_to_video` do ComfyUI:
+    `LoadImage` -> `LTXVImgToVideo`, cujos três outputs (positive, negative e
+    latent) alimentam `LTXVConditioning`, `LTXVScheduler` e `SamplerCustom`.
+    Sem referência, o grafo é o Text-to-Video puro (`EmptyLTXVLatentVideo`).
+    """
     geracao = config.get("geracao") or {}
     modelos = config.get("modelos") or {}
     primeira = config["cenas"][0]
+    cena_ref = cena_com_referencia(config)
+    usar_i2v = bool(cena_ref) if i2v is None else bool(i2v)
+    if usar_i2v and cena_ref is None:
+        raise ValueError(
+            "modo img2video solicitado, mas nenhuma cena define 'imagem_referencia'"
+        )
 
     largura = int(geracao.get("largura", 512))
     altura = int(geracao.get("altura", 320))
-    frames = int(primeira.get("frames") or geracao.get("frames", 33))
+    frames = ajustar_frames_ltx(int(primeira.get("frames") or geracao.get("frames", 33)))
     fps = float(geracao.get("fps", 12))
     steps = int(geracao.get("steps", 25))
     cfg = float(geracao.get("cfg", 3.0))
@@ -101,7 +235,52 @@ def construir_workflow_template(config: dict[str, Any]) -> dict[str, Any]:
     )
     referencia = Path(str(config.get("referencia_facial", "personagem_base.png"))).name
 
-    return {
+    workflow: dict[str, Any] = {
+        "1": {
+            "class_type": "CLIPLoader",
+            "inputs": {
+                "clip_name": modelos.get("text_encoder", "t5xxl_fp8_e4m3fn.safetensors"),
+                "type": "ltxv",
+                "device": "default",
+            },
+        },
+        "2": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {
+                "ckpt_name": modelos.get("checkpoint", "ltx-video-2b-v0.9.1.safetensors")
+            },
+        },
+        "3": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": str(primeira.get("prompt", "")), "clip": ["1", 0]},
+        },
+        "4": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": str(negativo), "clip": ["1", 0]},
+        },
+    }
+
+    if usar_i2v and cena_ref is not None:
+        workflow.update(
+            _ramo_img2video(
+                primeira,
+                cena_ref,
+                geracao,
+                modelos,
+                largura,
+                altura,
+                frames,
+                fps,
+                steps,
+                cfg,
+                sampler,
+                referencia,
+            )
+        )
+        return workflow
+
+    workflow.update(
+        {
         "1": {
             "class_type": "CLIPLoader",
             "inputs": {
@@ -199,7 +378,9 @@ def construir_workflow_template(config: dict[str, Any]) -> dict[str, Any]:
                 "codec": "h264",
             },
         },
-    }
+        }
+    )
+    return workflow
 
 
 def _opcoes_combo(opcoes: Any) -> list[str] | None:
@@ -290,6 +471,54 @@ def _verificar_criticos(config: dict[str, Any], models_dir: Path) -> list[str]:
 
 
 
+def _validar_referencias_cenas(
+    config: dict[str, Any],
+    raiz: Path,
+    log: Any,
+) -> list[str]:
+    """Valida e sincroniza as imagens de referência de cada cena para `input/`."""
+    problemas: list[str] = []
+    pasta_input = (config.get("comfyui") or {}).get("input_dir")
+    destino_dir = resolver(raiz, pasta_input) if pasta_input else None
+    for cena in config.get("cenas") or []:
+        referencia = cena.get("imagem_referencia")
+        if not referencia:
+            continue
+        cena_id = str(cena.get("id"))
+        try:
+            caminho = resolver(raiz, referencia)
+            detalhes = inspecionar_imagem(caminho, log)
+        except (FileNotFoundError, ValueError, RuntimeError) as erro:
+            problemas.append(f"{cena_id}: referência inválida ({erro})")
+            continue
+        print(
+            f"  [OK]    {cena_id}: {caminho.name} "
+            f"({detalhes['largura']}x{detalhes['altura']}, {detalhes['codec']})"
+        )
+        if destino_dir is None:
+            problemas.append(
+                f"{cena_id}: config.comfyui.input_dir ausente "
+                "(necessário para sincronizar a referência)"
+            )
+            continue
+        nome = nome_referencia_no_input(cena_id, caminho)
+        destino = sincronizar_para_input(caminho, destino_dir, nome)
+        log.info("%s: referência sincronizada em %s", cena_id, destino)
+    return problemas
+
+
+def _avisar_orcamento(config: dict[str, Any], log: Any) -> None:
+    """Avisa quando alguma cena passa do orçamento de VRAM para 6 GB."""
+    geracao = config.get("geracao") or {}
+    for cena in config.get("cenas") or []:
+        largura = int(cena.get("largura") or geracao.get("largura", 512))
+        altura = int(cena.get("altura") or geracao.get("altura", 320))
+        frames = ajustar_frames_ltx(int(cena.get("frames") or geracao.get("frames", 33)))
+        steps = int(cena.get("steps") or geracao.get("steps", 25))
+        for aviso in avaliar_orcamento_vram(largura, altura, frames, steps):
+            log.warning("%s: %s", cena.get("id"), aviso)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Diagnóstico de modelos/ComfyUI e geração do workflow_api.json"
@@ -308,6 +537,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Regrava o workflow_api.json a partir do config (mesmo se já existir)",
     )
     parser.add_argument("--timeout", type=float, default=15.0)
+    modo = parser.add_mutually_exclusive_group()
+    modo.add_argument(
+        "--i2v",
+        dest="i2v",
+        action="store_true",
+        default=None,
+        help="Força o grafo img2video (exige ao menos uma cena com 'imagem_referencia')",
+    )
+    modo.add_argument(
+        "--t2v",
+        dest="i2v",
+        action="store_false",
+        help="Força o grafo text2video puro (ignora as referências por cena)",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -334,12 +577,29 @@ def main(argv: list[str] | None = None) -> int:
     problemas.extend(_verificar_criticos(config, models_dir))
 
     if args.escrever_workflow or not workflow_path.exists():
-        workflow = construir_workflow_template(config)
+        try:
+            workflow = construir_workflow_template(config, i2v=args.i2v)
+        except ValueError as erro:
+            log.error("%s", erro)
+            return 1
         salvar_json_atomico(workflow_path, workflow)
-        log.info("workflow_api.json gravado (%d nós) em %s", len(workflow), workflow_path)
+        modo_txt = "img2video" if "LTXVImgToVideo" in {
+            no.get("class_type") for no in workflow.values()
+        } else "text2video"
+        log.info(
+            "workflow_api.json gravado (%d nós, %s) em %s",
+            len(workflow),
+            modo_txt,
+            workflow_path,
+        )
     else:
         workflow = carregar_json(workflow_path)
         log.info("workflow_api.json existente carregado (%d nós)", len(workflow))
+
+    print("\n== Referências por cena ==")
+    problemas.extend(_validar_referencias_cenas(config, raiz, log))
+    _avisar_orcamento(config, log)
+    log.info("Orçamento VRAM: %s", decompor_orcamento())
 
     referencia = str(config.get("referencia_facial") or "")
     caminho_ref = resolver(raiz, referencia) if referencia else None
@@ -364,7 +624,21 @@ def main(argv: list[str] | None = None) -> int:
                         destino_dir,
                     )
         else:
-            problemas.append(f"referência facial ausente/vazia: {caminho_ref}")
+            cenas_reactor = [
+                str(c.get("id"))
+                for c in config.get("cenas") or []
+                if c.get("aplicar_reactor")
+            ]
+            if cenas_reactor:
+                problemas.append(
+                    f"referência facial ausente/vazia: {caminho_ref} "
+                    f"(necessária para {', '.join(cenas_reactor)})"
+                )
+            else:
+                log.info(
+                    "Nenhuma cena usa ReActor: a referência facial %s pode ficar ausente.",
+                    caminho_ref,
+                )
 
     url = str(
         args.url or (config.get("comfyui") or {}).get("url") or "http://127.0.0.1:8188"
