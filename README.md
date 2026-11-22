@@ -241,3 +241,4 @@ versão antiga continua acessível no histórico Git:
 ```bash
 git show bcd6185:config/projeto.json
 ```
+# ai_video_studio
